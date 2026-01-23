@@ -1,3 +1,10 @@
+//! Windows Font Installer
+//!
+//! A simple utility for batch installing font files on Windows systems.
+//! Supports TTF, OTF, TTC, PFB, and PFM font formats.
+
+#![cfg(windows)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,126 +12,207 @@ use std::process::Command;
 use winreg::enums::*;
 use winreg::RegKey;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Get the path from command line arguments or use the current directory
-    let font_dir = match env::args().nth(1) {
-        Some(path) => PathBuf::from(path),
-        None => {
-            println!("No directory specified. Using current directory.");
-            env::current_dir()?
-        }
-    };
+/// Supported font file extensions
+const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "pfb", "pfm"];
 
-    if !font_dir.is_dir() {
-        return Err(format!("{} is not a valid directory", font_dir.display()).into());
+/// Installation statistics
+#[derive(Default)]
+struct InstallStats {
+    installed: u32,
+    skipped: u32,
+    failed: u32,
+}
+
+impl InstallStats {
+    fn print_summary(&self) {
+        println!("\nInstallation complete!");
+        println!("  Fonts installed: {}", self.installed);
+        println!("  Fonts skipped (already installed): {}", self.skipped);
+        println!("  Fonts failed: {}", self.failed);
+    }
+}
+
+/// Font installer configuration and state
+struct FontInstaller {
+    source_dir: PathBuf,
+    fonts_dir: PathBuf,
+    fonts_reg_key: RegKey,
+    stats: InstallStats,
+}
+
+impl FontInstaller {
+    /// Create a new FontInstaller instance
+    fn new(source_dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        if !source_dir.is_dir() {
+            return Err(format!("{} is not a valid directory", source_dir.display()).into());
+        }
+
+        // Get Windows Fonts directory from registry
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let fonts_reg_key =
+            hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts")?;
+
+        let windows_reg = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")?;
+        let system_root: String = windows_reg.get_value("SystemRoot")?;
+        let fonts_dir = Path::new(&system_root).join("Fonts");
+
+        Ok(Self {
+            source_dir,
+            fonts_dir,
+            fonts_reg_key,
+            stats: InstallStats::default(),
+        })
     }
 
-    println!("Scanning for font files in: {}", font_dir.display());
+    /// Run the font installation process
+    fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Scanning for font files in: {}", self.source_dir.display());
+        println!("Windows Fonts directory: {}", self.fonts_dir.display());
 
-    // Get Windows Fonts directory from registry
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let fonts_reg_key = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts")?;
-    
-    let windows_reg = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")?;
-    let system_root: String = windows_reg.get_value("SystemRoot")?;
-    let fonts_dir = Path::new(&system_root).join("Fonts");
+        for entry in fs::read_dir(&self.source_dir)? {
+            let entry = entry?;
+            let path = entry.path();
 
-    println!("Windows Fonts directory: {}", fonts_dir.display());
+            if path.is_dir() {
+                continue;
+            }
 
-    // Track installation stats
-    let mut installed_count = 0;
-    let mut skipped_count = 0;
-    let mut failed_count = 0;
-
-    // Process each file in the directory
-    for entry in fs::read_dir(&font_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        
-        // Skip directories and non-font files
-        if path.is_dir() {
-            continue;
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if is_font_extension(ext) {
+                    self.process_font(&path);
+                }
+            }
         }
-        
-        // Check if it's a font file by extension
-        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        if !is_font_extension(extension) {
-            continue;
-        }
-        
-        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        self.stats.print_summary();
+        Ok(())
+    }
+
+    /// Process a single font file
+    fn process_font(&mut self, path: &Path) {
+        let file_name = match path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => return,
+        };
+
         println!("Processing font: {}", file_name);
-        
-        // Check if font is already installed
+
         let font_name = get_font_name(&file_name);
-        let is_installed = fonts_reg_key.get_value::<String, _>(&font_name).is_ok();
-        
-        if is_installed {
+
+        // Check if font is already installed
+        if self
+            .fonts_reg_key
+            .get_value::<String, _>(&font_name)
+            .is_ok()
+        {
             println!("  Font already installed: {}", font_name);
-            skipped_count += 1;
-            continue;
+            self.stats.skipped += 1;
+            return;
         }
-        
-        // Copy font file to Windows Fonts directory
-        let dest_path = fonts_dir.join(&file_name);
-        match fs::copy(&path, &dest_path) {
+
+        // Copy and register font
+        let dest_path = self.fonts_dir.join(&file_name);
+        match fs::copy(path, &dest_path) {
             Ok(_) => {
                 println!("  Copied to Windows Fonts directory");
-                
-                // Add font to registry using Windows API
+
                 if let Err(e) = add_font_to_registry(&file_name) {
                     println!("  Failed to add to registry: {}", e);
-                    failed_count += 1;
-                    // Try to clean up the copied file
+                    self.stats.failed += 1;
                     let _ = fs::remove_file(&dest_path);
                 } else {
                     println!("  Successfully installed: {}", font_name);
-                    installed_count += 1;
+                    self.stats.installed += 1;
                 }
             }
             Err(e) => {
                 println!("  Failed to copy font file: {}", e);
-                failed_count += 1;
+                self.stats.failed += 1;
             }
         }
     }
-    
-    println!("\nInstallation complete!");
-    println!("  Fonts installed: {}", installed_count);
-    println!("  Fonts skipped (already installed): {}", skipped_count);
-    println!("  Fonts failed: {}", failed_count);
-    
-    Ok(())
 }
 
-// Check if file extension is a font extension
+/// Check if file extension is a font extension
 fn is_font_extension(extension: &str) -> bool {
-    matches!(extension.to_lowercase().as_str(), "ttf" | "otf" | "ttc" | "pfb" | "pfm")
+    FONT_EXTENSIONS.contains(&extension.to_lowercase().as_str())
 }
 
-// Extract font name from filename
+/// Extract font name from filename (without extension)
 fn get_font_name(filename: &str) -> String {
-    filename.split('.').next().unwrap_or(filename).to_string()
+    Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename)
+        .to_string()
 }
 
-// Add font to Windows registry using Windows shell commands
+/// Add font to Windows registry using PowerShell Shell.Application
 fn add_font_to_registry(font_filename: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Use PowerShell to add font to registry
     let ps_command = format!(
         "$fonts = (New-Object -ComObject Shell.Application).Namespace(0x14); \
          $fonts.CopyHere('C:\\Windows\\Fonts\\{}'); \
          [System.Runtime.Interopservices.Marshal]::ReleaseComObject($fonts) | Out-Null",
         font_filename
     );
-    
+
     let output = Command::new("powershell")
-        .args(&["-Command", &ps_command])
+        .args(["-Command", &ps_command])
         .output()?;
-    
+
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
         return Err(format!("PowerShell command failed: {}", error).into());
     }
-    
+
     Ok(())
+}
+
+fn print_usage() {
+    println!("Windows Font Installer v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("Usage: font-installer [OPTIONS] [DIRECTORY]");
+    println!();
+    println!("Arguments:");
+    println!("  [DIRECTORY]  Path to directory containing font files (default: current directory)");
+    println!();
+    println!("Options:");
+    println!("  -h, --help     Print this help message");
+    println!("  -v, --version  Print version information");
+    println!();
+    println!("Supported formats: TTF, OTF, TTC, PFB, PFM");
+}
+
+fn print_version() {
+    println!("font-installer {}", env!("CARGO_PKG_VERSION"));
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+
+    // Handle flags
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(());
+            }
+            "-v" | "--version" => {
+                print_version();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    // Get the source directory
+    let font_dir = if args.len() > 1 && !args[1].starts_with('-') {
+        PathBuf::from(&args[1])
+    } else {
+        println!("No directory specified. Using current directory.");
+        env::current_dir()?
+    };
+
+    let mut installer = FontInstaller::new(font_dir)?;
+    installer.run()
 }

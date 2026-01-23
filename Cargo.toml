@@ -2,6 +2,20 @@
 name = "font-installer"
 version = "0.1.0"
 edition = "2024"
+authors = ["AnlangA"]
+description = "A simple Rust utility for batch installing font files on Windows systems"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/AnlangA/font-installer"
+keywords = ["font", "windows", "installer", "utility"]
+categories = ["command-line-utilities"]
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
