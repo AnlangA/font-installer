@@ -138,25 +138,58 @@ fn is_font_extension(extension: &str) -> bool {
     FONT_EXTENSIONS.contains(&extension.to_lowercase().as_str())
 }
 
+/// Maximum recursion depth for directory traversal to prevent stack overflow
+const MAX_RECURSION_DEPTH: u32 = 100;
+
 /// Recursively collect all font files from a directory and its subdirectories
 fn collect_font_files(dir: &Path) -> Vec<PathBuf> {
     let mut font_files = Vec::new();
-    collect_font_files_recursive(dir, &mut font_files);
+    collect_font_files_recursive(dir, &mut font_files, 0);
     font_files
 }
 
 /// Helper function to recursively traverse directories and collect font files
-fn collect_font_files_recursive(dir: &Path, font_files: &mut Vec<PathBuf>) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_dir() {
-                // Recursively search subdirectories
-                collect_font_files_recursive(&path, font_files);
-            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if is_font_extension(ext) {
-                    font_files.push(path);
-                }
+fn collect_font_files_recursive(dir: &Path, font_files: &mut Vec<PathBuf>, depth: u32) {
+    // Prevent stack overflow from deeply nested directories
+    if depth >= MAX_RECURSION_DEPTH {
+        eprintln!(
+            "Warning: Maximum directory depth ({}) reached at: {}",
+            MAX_RECURSION_DEPTH,
+            dir.display()
+        );
+        return;
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Warning: Cannot read directory {}: {}", dir.display(), e);
+            return;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Warning: Error reading directory entry: {}", e);
+                continue;
+            }
+        };
+
+        let path = entry.path();
+
+        // Skip symlinks to avoid potential infinite loops
+        if path.is_symlink() {
+            continue;
+        }
+
+        if path.is_dir() {
+            // Recursively search subdirectories
+            collect_font_files_recursive(&path, font_files, depth + 1);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if is_font_extension(ext) {
+                font_files.push(path);
             }
         }
     }
