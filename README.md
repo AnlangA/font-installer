@@ -8,10 +8,11 @@ A simple Rust utility for batch installing font files on Windows systems.
 
 ## Overview
 
-This program automates the process of installing font files to the Windows operating system. It scans a specified directory for font files, copies them to the Windows Fonts directory, and registers them in the system.
+This program automates the process of installing font files to the Windows operating system. It scans a specified directory (including all subdirectories) for font files, copies them to the Windows Fonts directory, and registers them in the system.
 
 ## Features
 
+- **Recursive directory scanning**: Searches for fonts in all subdirectories
 - Scans directories for common font file formats (TTF, OTF, TTC, PFB, PFM)
 - Detects and skips already installed fonts
 - Provides detailed installation statistics
@@ -84,8 +85,9 @@ Options:
 ### Example Output
 
 ```
-Scanning for font files in: C:\path\to\fonts
+Scanning for font files in: C:\path\to\fonts (including subdirectories)
 Windows Fonts directory: C:\Windows\Fonts
+Found 20 font file(s).
 Processing font: HKGrotesk-Black.otf
   Copied to Windows Fonts directory
   Successfully installed: HKGrotesk-Black
